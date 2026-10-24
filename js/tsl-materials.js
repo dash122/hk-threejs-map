@@ -2451,14 +2451,13 @@ const waterBoxCover = Fn(([x, a, b, s]) => {
  *   through the same wave normals & Fresnel, blurred by the unresolved slopes into the familiar vertical light streaks.
  * - Park lakes, the Reservoir & fountains (well above the harbour) get finer, calmer ripples and a greener, duller body.
  */
-function createWaterMaterial() {
+function createWaterMaterial({ harbourY = ISLAND_BOUNDS ? ISLAND_BOUNDS.waterLevel : -2.2 } = {}) {
   const mat = new THREE.MeshStandardNodeMaterial({
     metalness: 0.0,
     roughness: 0.25
   });
 
   const waveTex = getWaterWaveTexture();
-  const harbourY = ISLAND_BOUNDS ? ISLAND_BOUNDS.waterLevel : -2.2;
   const pond = smoothstep(harbourY + 1.0, harbourY + 2.0, positionWorld.y);
 
   // [tile size (m), rotation (rad), RMS slope]: incommensurate scales & angles so no pattern repeats
@@ -3011,6 +3010,7 @@ function createCarFlareMaterial() {
 export {
   cityUniforms,
   WALL_KINDS,
+  noise2D,
   createCurtainWallMaterial,
   createPreWarBuildingMaterial,
   createFacadeBoxes,

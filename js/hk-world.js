@@ -5,8 +5,13 @@
 // Also provides the ground the controllers stand on (terrain or a deck, whichever is right under the player) and the
 // building wall colliders.
 import * as THREE from 'three/webgpu';
+import { attribute, color, mix, normalWorld, positionWorld, smoothstep } from 'three/tsl';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { GEO } from './hk-geodata.js';
+import {
+  noise2D, createCurtainWallMaterial, createPreWarBuildingMaterial, createRoadSurfaceMaterial, createRoadPaintMaterial,
+  createSidewalkMaterial, createWaterMaterial, createParkLawnMaterial, createParkPavingMaterial
+} from './tsl-materials.js';
 
 const SEA_LEVEL = 1.1; // mean sea level, metres above Principal Datum
 const ROAD_LIFT = 0.25; // road surfaces sit just above the terrain mesh
@@ -56,8 +61,8 @@ function terrainMesh(g, material, sink = null) {
     if (y < 0.4) y = -6; // the sea floor drops away under the water surface
     pos[k * 3] = x; pos[k * 3 + 1] = y; pos[k * 3 + 2] = z;
     // Shore sand, urban grey-green lowland, wooded hillsides, rock on the peaks
-    if (y < 3) c.setRGB(0.46, 0.46, 0.42);
-    else if (y < 25) c.setRGB(0.42, 0.44, 0.38);
+    if (y < 3) c.setRGB(0.3, 0.3, 0.28);
+    else if (y < 25) c.setRGB(0.3, 0.32, 0.27);
     else if (y < 280) c.setRGB(0.22, 0.33, 0.17).lerp(new THREE.Color(0.30, 0.36, 0.22), Math.min(1, (y - 25) / 250));
     else c.setRGB(0.42, 0.40, 0.34);
     col[k * 3] = c.r; col[k * 3 + 1] = c.g; col[k * 3 + 2] = c.b;
@@ -77,6 +82,20 @@ function terrainMesh(g, material, sink = null) {
   const mesh = new THREE.Mesh(geo, material);
   mesh.receiveShadow = true;
   return mesh;
+}
+
+// Hillside ground: the height-banded vertex colours broken up by patchy scrub & grass, bare rock on the steep cuts
+function createTerrainMaterial() {
+  const mat = new THREE.MeshStandardNodeMaterial({ roughness: 0.95, metalness: 0.0 });
+  const xz = positionWorld.xz;
+  const patch = noise2D(xz.mul(0.045)).mul(0.55).add(noise2D(xz.mul(0.21)).mul(0.3)).add(noise2D(xz.mul(1.7)).mul(0.15));
+  const base = attribute('color', 'vec3').mul(patch.mul(0.45).add(0.78));
+  const scrub = mix(color(0x2f4a22), color(0x5c6b35), noise2D(xz.mul(0.09)));
+  const vegetated = smoothstep(18.0, 40.0, positionWorld.y);
+  const steep = smoothstep(0.82, 0.6, normalWorld.y);
+  const rock = mix(color(0x6d675c), color(0x8d877a), noise2D(xz.mul(0.6)));
+  mat.colorNode = mix(mix(base, scrub.mul(patch.mul(0.4).add(0.8)), vegetated.mul(smoothstep(0.35, 0.65, patch)).mul(0.6)), rock, steep);
+  return mat;
 }
 
 // =====================================================================================================================
@@ -159,6 +178,8 @@ function elevateNetwork() {
     return {
       name: GEO.roadGraph.names[l[2]] || '',
       width: Math.max(3.5, l[3]),
+      lanes: Math.max(1, l[4]),
+      oneWay: l[5] !== 0,
       level,
       pts: pts.map((p, i) => {
         if (i > 0) s += Math.hypot(p[0] - pts[i - 1][0], p[1] - pts[i - 1][1]);
@@ -203,6 +224,86 @@ function ribbon(pts, hw, depth = 0) {
   return geo;
 }
 
+// [x, z] points subdivided to at most `step` metres apart
+function densify(pts, step) {
+  const out = [pts[0]];
+  for (let i = 1; i < pts.length; i++) {
+    const [ax, az] = pts[i - 1], [bx, bz] = pts[i];
+    const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / step));
+    for (let s = 1; s <= n; s++) out.push([ax + (bx - ax) * s / n, az + (bz - az) * s / n]);
+  }
+  return out;
+}
+
+// pts ([x, y, z]) shifted `o` metres to the right of their direction of travel
+function offsetLine(pts, o) {
+  const n = pts.length;
+  return pts.map((p, i) => {
+    const a = pts[Math.max(0, i - 1)], b = pts[Math.min(n - 1, i + 1)];
+    const dx = b[0] - a[0], dz = b[2] - a[2], len = Math.hypot(dx, dz) || 1;
+    return [p[0] - (dz / len) * o, p[1], p[2] + (dx / len) * o];
+  });
+}
+
+// Lane markings in Hong Kong's style (js/road-paint.js's strips, draped along each road's own heights): white dashed
+// lane lines, a white dashed centre line on two-way roads (double white on wide ones), solid white edge lines on
+// flyovers & trunk roads
+const WHITE = new THREE.Color(0xe6e2d6);
+const YELLOW = new THREE.Color(0xe8ad22);
+function buildRoadPaint(roads) {
+  const position = [], side = [], paint = [], colors = [], index = [];
+  const line = (pts, o, w, col, period = 1, duty = 1) => {
+    const off = offsetLine(pts, o);
+    let u = 0;
+    for (let i = 0; i < off.length; i++) {
+      const p = off[i], a = off[Math.max(0, i - 1)], b = off[Math.min(off.length - 1, i + 1)];
+      if (i) u += Math.hypot(p[0] - off[i - 1][0], p[2] - off[i - 1][2]);
+      const dx = b[0] - a[0], dz = b[2] - a[2], len = Math.hypot(dx, dz) || 1;
+      const sx = (-dz / len) * w / 2, sz = (dx / len) * w / 2;
+      for (const s of [-1, 1]) {
+        position.push(p[0] + sx * s, p[1] + 0.03, p[2] + sz * s);
+        side.push(sx * s, sz * s);
+        paint.push(u, period, duty);
+        colors.push(col.r, col.g, col.b);
+      }
+      if (i) {
+        const k = position.length / 3 - 4;
+        index.push(k, k + 1, k + 3, k, k + 3, k + 2);
+      }
+    }
+  };
+  for (const r of roads) {
+    if (r.pts.length < 2 || r.width < 5) continue;
+    const half = r.width / 2;
+    const laneW = r.width / r.lanes;
+    if (r.oneWay) {
+      for (let k = 1; k < r.lanes; k++) line(r.pts, -half + k * laneW, 0.12, WHITE, 6, 0.5);
+    } else {
+      const wide = r.lanes >= 4;
+      if (wide) { line(r.pts, -0.15, 0.12, WHITE); line(r.pts, 0.15, 0.12, WHITE); }
+      else line(r.pts, 0, 0.12, WHITE, 6, 0.5);
+      const perSide = Math.max(1, Math.floor(r.lanes / 2));
+      for (let k = 1; k < perSide; k++) for (const s of [1, -1]) line(r.pts, s * k * (half / perSide), 0.12, WHITE, 6, 0.5);
+    }
+    // Edge lines: white on flyovers & fast roads, a yellow no-stopping line along the kerb elsewhere
+    const fast = r.level > 0 || r.lanes >= 4;
+    for (const s of [1, -1]) line(r.pts, s * (half - 0.35), fast ? 0.15 : 0.1, fast ? WHITE : YELLOW, fast ? 1 : 1, 1);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(position, 3));
+  geo.setAttribute('side', new THREE.Float32BufferAttribute(side, 2));
+  geo.setAttribute('paint', new THREE.Float32BufferAttribute(paint, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(new Float32Array(position.length).map((_, i) => (i % 3 === 1 ? 1 : 0)), 3));
+  geo.setIndex(index);
+  const material = createRoadPaintMaterial();
+  material.side = THREE.DoubleSide;
+  const mesh = new THREE.Mesh(geo, material);
+  mesh.name = 'HongKongRoadPaint';
+  mesh.renderOrder = 1;
+  return mesh;
+}
+
 // =====================================================================================================================
 // Spatial index of deck segments (the ground the controllers stand on) and road names (location labels)
 // =====================================================================================================================
@@ -242,6 +343,21 @@ function nearSegments(cells, x, z, fn) {
 
 const titleCase = (s) => s.toLowerCase().replace(/(^|[\s'(-])([a-z])/g, (m, p, c) => p + c.toUpperCase()).replace(/'S\b/g, "'s");
 
+// Building finishes (js/tsl-materials.js facades, lit windows after dark): [material factory, options]
+const BUILDING_STYLES = [
+  // 0: blue-green glass office & hotel towers
+  [createCurtainWallMaterial, { glassTint: 0x1b3346, frameTint: 0x2a3540, windowWidth: 3.0, floorHeight: 4.0, litProbability: 0.42, seed: 3.1 }],
+  // 1-4: residential towers in pale mosaic tile, cream, salmon & grey-blue, close-set windows
+  [createPreWarBuildingMaterial, { stoneColor: 0xd9d5cb, trimColor: 0xb7b1a5, windowGlassColor: 0x1a2732, windowWidth: 1.9, floorHeight: 2.9, windowRatioX: 0.55, windowRatioY: 0.5, litProbability: 0.62, warmth: 0.7, seed: 21.7 }],
+  [createPreWarBuildingMaterial, { stoneColor: 0xe0cfae, trimColor: 0xc2b291, windowGlassColor: 0x1c2630, windowWidth: 2.0, floorHeight: 2.9, windowRatioX: 0.55, windowRatioY: 0.5, litProbability: 0.58, warmth: 0.85, seed: 33.2 }],
+  [createPreWarBuildingMaterial, { stoneColor: 0xc99b86, trimColor: 0xd8c4b0, windowGlassColor: 0x1a2430, windowWidth: 1.9, floorHeight: 2.9, windowRatioX: 0.55, windowRatioY: 0.5, litProbability: 0.6, warmth: 0.8, seed: 47.9 }],
+  [createPreWarBuildingMaterial, { stoneColor: 0xa9b4b8, trimColor: 0xd5d8d6, windowGlassColor: 0x18242e, windowWidth: 2.0, floorHeight: 2.9, windowRatioX: 0.55, windowRatioY: 0.5, litProbability: 0.6, warmth: 0.65, seed: 58.3 }],
+  // 5: podiums: shopfronts below, deeper bays
+  [createPreWarBuildingMaterial, { stoneColor: 0xbdb5a6, trimColor: 0x8f887b, windowGlassColor: 0x1d2a35, windowWidth: 3.2, floorHeight: 4.2, litProbability: 0.5, warmth: 0.75, seed: 71.4 }],
+  // 6: open-sided & temporary structures: plain painted steel & concrete
+  [(o) => new THREE.MeshStandardMaterial(o), { color: 0x8b8f92, roughness: 0.6, metalness: 0.2 }]
+];
+
 // =====================================================================================================================
 // Build
 // =====================================================================================================================
@@ -251,11 +367,11 @@ export function buildHongKong(scene) {
   scene.add(root);
 
   // Terrain & sea
-  const groundMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95 });
+  const groundMat = createTerrainMaterial();
   const pilotRect = { minX: PILOT.x0 + 20, maxX: PILOT.x0 + (PILOT.cols - 2) * PILOT.cell, minZ: PILOT.z0 + 20, maxZ: PILOT.z0 + (PILOT.rows - 2) * PILOT.cell };
   root.add(terrainMesh(PILOT, groundMat));
   root.add(terrainMesh(BACKDROP, groundMat, pilotRect));
-  const sea = new THREE.Mesh(new THREE.PlaneGeometry(40000, 40000), new THREE.MeshStandardMaterial({ color: 0x1d4256, roughness: 0.12, metalness: 0.3 }));
+  const sea = new THREE.Mesh(new THREE.PlaneGeometry(40000, 40000), createWaterMaterial({ harbourY: SEA_LEVEL }));
   sea.rotation.x = -Math.PI / 2;
   sea.position.y = SEA_LEVEL;
   sea.receiveShadow = true;
@@ -280,19 +396,58 @@ export function buildHongKong(scene) {
       if (h > 2.5) piers.push([b[0], base, b[2], h]);
     }
   }
-  const asphalt = new THREE.MeshStandardMaterial({ color: 0x3a3b3d, roughness: 0.9, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+  const asphalt = createRoadSurfaceMaterial();
+  Object.assign(asphalt, { polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
   const concrete = new THREE.MeshStandardMaterial({ color: 0x8d8a84, roughness: 0.85, side: THREE.DoubleSide });
-  if (groundRoads.length) root.add(Object.assign(new THREE.Mesh(mergeGeometries(groundRoads), asphalt), { receiveShadow: true }));
+  const surface = (geos, material) => {
+    const g = mergeGeometries(geos);
+    g.computeVertexNormals();
+    const mesh = new THREE.Mesh(g, material);
+    mesh.receiveShadow = true;
+    root.add(mesh);
+    return mesh;
+  };
+  if (groundRoads.length) surface(groundRoads, asphalt);
+  // Pavements: a paved band either side of every ground-level road, laid under the asphalt (which wins wherever
+  // roads cross)
+  const pavement = createSidewalkMaterial();
+  Object.assign(pavement, { polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
+  surface(roads.filter((r) => r.level === 0).map((r) => ribbon(r.pts.map((p) => [p[0], p[1] - 0.03, p[2]]), r.width / 2 + 3.2)), pavement);
+  const deckTops = roads.filter((r) => r.level > 0).map((r) => ({ ...r, pts: r.pts.map((p) => [p[0], p[1] + 0.05, p[2]]) }));
   if (decks.length) {
-    const deckGeo = mergeGeometries(decks);
-    deckGeo.computeVertexNormals();
-    const deckMesh = new THREE.Mesh(deckGeo, concrete);
-    deckMesh.castShadow = deckMesh.receiveShadow = true;
-    root.add(deckMesh);
-    // Asphalt on the deck tops
-    const tops = roads.filter((r) => r.level > 0).map((r) => ribbon(r.pts.map((p) => [p[0], p[1] + 0.05, p[2]]), r.width / 2));
-    root.add(Object.assign(new THREE.Mesh(mergeGeometries(tops), asphalt), { receiveShadow: true }));
+    surface(decks, concrete).castShadow = true;
+    surface(deckTops.map((r) => ribbon(r.pts, r.width / 2)), asphalt);
+    // Parapets along both deck edges
+    const parapets = [];
+    for (const r of deckTops) {
+      for (const side of [1, -1]) {
+        const off = offsetLine(r.pts, side * (r.width / 2 + 0.2));
+        parapets.push(ribbon(off.map((p) => [p[0], p[1] + 1.0, p[2]]), 0.18, 1.05));
+      }
+    }
+    surface(parapets, concrete).castShadow = true;
   }
+  root.add(buildRoadPaint([...roads.filter((r) => r.level === 0), ...deckTops]));
+
+  // Footways: paved paths, footbridges raised over the roads on their own decks
+  const paths = [], bridges = [];
+  for (const [, level, bridge, , flatPts] of GEO.footways) {
+    if (level < 0 || flatPts.length < 4) continue;
+    const pts = [];
+    for (let i = 0; i < flatPts.length; i += 2) pts.push([flatPts[i], flatPts[i + 1]]);
+    const dense = densify(pts, 4);
+    if (bridge || level > 0) {
+      // Up from the ground at both ends to a 5.5 m clearance over the road
+      let total = 0;
+      const s = dense.map((p, i) => (total += i ? Math.hypot(p[0] - dense[i - 1][0], p[1] - dense[i - 1][1]) : 0));
+      const rise = 5.5 + Math.max(0, level - 1) * 4;
+      bridges.push(ribbon(dense.map((p, i) => [p[0], terrainHeight(p[0], p[1]) + Math.min(rise, Math.min(s[i], total - s[i]) * 0.5) + 0.3, p[1]]), 1.4, 0.6));
+    } else {
+      paths.push(ribbon(dense.map((p) => [p[0], Math.max(terrainHeight(p[0], p[1]), SEA_LEVEL) + 0.2, p[1]]), 1.0));
+    }
+  }
+  if (paths.length) surface(paths, pavement);
+  if (bridges.length) surface(bridges, createParkPavingMaterial()).castShadow = true;
   if (piers.length) {
     const pier = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.9, 1.1, 1, 12).translate(0, 0.5, 0), concrete, piers.length);
     const m = new THREE.Matrix4();
@@ -304,6 +459,8 @@ export function buildHongKong(scene) {
   // Parks & open space: draped over the terrain
   const parkColors = { water: 0x2c5b6e, pool: 0x3b8fb0, rock: 0x77746b, track: 0x9b4d3b, pitch: 0x4c7f3a, sports: 0x5a7d4a };
   const parkGeos = new Map();
+  const GRASS = 0x3f6b33;
+  const lawn = createParkLawnMaterial();
   for (const p of GEO.parks) {
     for (const ring of p.rings) {
       if (ring.length < 6) continue;
@@ -316,7 +473,7 @@ export function buildHongKong(scene) {
         pos.setXYZ(i, x, terrainHeight(x, z) + 0.12, z);
       }
       g.index.array.reverse(); // the xz plane flips the winding: face up
-      const c = parkColors[p.cat] ?? 0x3f6b33;
+      const c = parkColors[p.cat] ?? GRASS;
       if (!parkGeos.has(c)) parkGeos.set(c, []);
       parkGeos.get(c).push(g);
     }
@@ -324,7 +481,9 @@ export function buildHongKong(scene) {
   for (const [color, geos] of parkGeos) {
     const g = mergeGeometries(geos);
     g.computeVertexNormals();
-    root.add(Object.assign(new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color, roughness: 0.95, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 })), { receiveShadow: true }));
+    const material = color === GRASS ? lawn : new THREE.MeshStandardMaterial({ color, roughness: 0.95 });
+    Object.assign(material, { polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
+    root.add(Object.assign(new THREE.Mesh(g, material), { receiveShadow: true }));
   }
 
   // Ferry piers: slabs over the water
@@ -337,7 +496,7 @@ export function buildHongKong(scene) {
 
   // Buildings: footprints extruded from the ground (or their base level) to their top level; wall colliders
   const colliders = [];
-  const buildingGeos = [[], [], []];
+  const buildingGeos = BUILDING_STYLES.map(() => []);
   for (const [outline, base, top, type, , holes] of GEO.buildings) {
     if (outline.length < 6 || !(top > base)) continue;
     const shape = new THREE.Shape();
@@ -355,7 +514,10 @@ export function buildHongKong(scene) {
     const g = new THREE.ExtrudeGeometry(shape, { depth: top - bottom, bevelEnabled: false, curveSegments: 1 });
     g.rotateX(-Math.PI / 2).translate(0, bottom, 0);
     g.deleteAttribute('uv');
-    buildingGeos[type === 0 ? 0 : type === 1 ? 1 : 2].push(g);
+    // Tall towers in glass, other towers in one of the residential tile finishes, podiums with shopfronts
+    const hash = (Math.abs(Math.sin(outline[0] * 12.9898 + outline[1] * 78.233)) * 43758.5453) % 1;
+    const style = type >= 2 ? 6 : type === 1 ? 5 : top - bottom > 110 && hash < 0.6 ? 0 : 1 + Math.floor(hash * 4);
+    buildingGeos[style].push(g);
     if (type < 2) {
       for (let i = 0; i < outline.length; i += 2) {
         const ax = outline[i], az = outline[i + 1];
@@ -368,11 +530,7 @@ export function buildHongKong(scene) {
       }
     }
   }
-  const buildingMats = [
-    new THREE.MeshStandardMaterial({ color: 0xc9c3b8, roughness: 0.75 }), // towers
-    new THREE.MeshStandardMaterial({ color: 0xa8a39a, roughness: 0.8 }), // podiums
-    new THREE.MeshStandardMaterial({ color: 0x8b8f92, roughness: 0.6 }) // open-sided & temporary structures
-  ];
+  const buildingMats = BUILDING_STYLES.map(([make, opts]) => make(opts));
   buildingGeos.forEach((geos, i) => {
     if (!geos.length) return;
     const mesh = new THREE.Mesh(mergeGeometries(geos), buildingMats[i]);
@@ -415,6 +573,7 @@ export function buildHongKong(scene) {
     bounds: { minX: GEO.pilot.minX, maxX: GEO.pilot.maxX, minZ: GEO.pilot.minZ, maxZ: GEO.pilot.maxZ },
     spawn: { x: 0, z: 0, heading: Math.PI / 2 },
     groundHeight,
+    isWater: (x, z, refY = null) => groundHeight(x, z, 'car', refY) < SEA_LEVEL - 0.2,
     locationLabel,
     teleports
   };

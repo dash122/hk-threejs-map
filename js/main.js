@@ -135,6 +135,7 @@ async function initApp() {
       for (const mode of Object.keys(controllerManager.entities)) {
         const p = saved.entities?.[mode];
         if (!p || ![p.x, p.y, p.z, p.heading].every(Number.isFinite)) continue;
+        if (hongKong && mode !== 'helicopter' && hongKong.isWater(p.x, p.z, p.y)) continue; // saved out in the harbour
         controllerManager.setMode(mode);
         controllerManager.teleportActiveTo(p.x, p.z, p.heading, p.y);
       }

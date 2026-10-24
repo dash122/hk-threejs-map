@@ -348,6 +348,7 @@ class ThirdPersonControllerManager {
     const clear = (p) => {
       if (!p) return false;
       const baseY = heli ? altitude : this.getGroundHeight(p.x, p.z, this.activeMode);
+      if (!heli && this.world?.isWater?.(p.x, p.z, baseY + 0.1)) return false;
       const y = heli ? altitude : this.activeMode === 'person' ? baseY + 1 : 1;
       // Keep other player models out of both the arrival and its default chase view. A corridor also prevents a
       // parked car between camera and character from hiding the character even when the camera itself is outside it.
@@ -857,6 +858,21 @@ class ThirdPersonControllerManager {
     // The detailed island (the helicopter may roam out over the harbour & the boroughs)
     const heli = this.activeMode === 'helicopter';
     const m = heli ? 6000 : 0;
+    // Another map's shoreline: anyone not flying stays on dry land (or a deck), back where they last were
+    if (this.world?.isWater && !heli) {
+      if (!this._dry) this._dry = new WeakMap();
+      const dry = this._dry.get(pos);
+      if (dry && this.world.isWater(pos.x, pos.z, pos.y)) {
+        pos.x = dry.x;
+        pos.z = dry.z;
+        if (carEntity) { carEntity.speed *= -0.2; carEntity.vx = carEntity.vz = 0; }
+      } else if (dry) {
+        dry.x = pos.x;
+        dry.z = pos.z;
+      } else {
+        this._dry.set(pos, { x: pos.x, z: pos.z });
+      }
+    }
     pos.x = Math.max(this.bounds.minX - m, Math.min(this.bounds.maxX + m, pos.x));
     pos.z = Math.max(this.bounds.minZ + (heli ? -6000 : 30), Math.min(this.bounds.maxZ + m, pos.z));
     if (this.activeMode !== 'helicopter' && !this.world && getIslandBoundsAtZ) {
