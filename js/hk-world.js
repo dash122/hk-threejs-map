@@ -5,7 +5,7 @@
 // Also provides the ground the controllers stand on (terrain or a deck, whichever is right under the player) and the
 // building wall colliders.
 import * as THREE from 'three/webgpu';
-import { attribute, color, mix, normalWorld, positionWorld, smoothstep } from 'three/tsl';
+import { color, mix, normalWorld, positionWorld, smoothstep, vertexColor } from 'three/tsl';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { GEO } from './hk-geodata.js';
 import {
@@ -19,6 +19,7 @@ const DECK_RISE = 8; // deck height above the ground per TD level
 const RAMP_GRADE = 0.06; // ramps climb at most 6% from their ground-level join
 const DECK_DEPTH = 1.4; // girder depth under a deck
 const PIER_SPACING = 28;
+const STREET_RELIEF = 0.35; // share of the ground's bumps between junctions that streets keep
 
 // =====================================================================================================================
 // Terrain
@@ -49,7 +50,7 @@ export function terrainHeight(x, z) {
   return b != null ? b : 0;
 }
 
-function terrainMesh(g, material, sink = null) {
+function terrainMesh(g, material, sink = null, conform = null) {
   const { cols, rows, cell, x0, z0 } = g;
   const pos = new Float32Array(cols * rows * 3);
   const col = new Float32Array(cols * rows * 3);
@@ -58,6 +59,7 @@ function terrainMesh(g, material, sink = null) {
     const k = j * cols + i, x = x0 + i * cell, z = z0 + j * cell;
     let y = g.h[k] / 10;
     if (sink && x > sink.minX && x < sink.maxX && z > sink.minZ && z < sink.maxZ) y -= 4; // under the pilot's finer mesh
+    if (conform) y = conform(x, z, y);
     if (y < 0.4) y = -6; // the sea floor drops away under the water surface
     pos[k * 3] = x; pos[k * 3 + 1] = y; pos[k * 3 + 2] = z;
     // Shore sand, urban grey-green lowland, wooded hillsides, rock on the peaks
@@ -89,7 +91,7 @@ function createTerrainMaterial() {
   const mat = new THREE.MeshStandardNodeMaterial({ roughness: 0.95, metalness: 0.0 });
   const xz = positionWorld.xz;
   const patch = noise2D(xz.mul(0.045)).mul(0.55).add(noise2D(xz.mul(0.21)).mul(0.3)).add(noise2D(xz.mul(1.7)).mul(0.15));
-  const base = attribute('color', 'vec3').mul(patch.mul(0.45).add(0.78));
+  const base = vertexColor().rgb.mul(patch.mul(0.45).add(0.78));
   const scrub = mix(color(0x2f4a22), color(0x5c6b35), noise2D(xz.mul(0.09)));
   const vegetated = smoothstep(18.0, 40.0, positionWorld.y);
   const steep = smoothstep(0.82, 0.6, normalWorld.y);
@@ -164,16 +166,41 @@ function elevateNetwork() {
     if (l[7] <= 0) return;
     for (const n of [l[0], l[1]]) nodeY[n] = Math.max(nodeY[n], cruise(nodes[n * 2], nodes[n * 2 + 1], l[7]));
   });
+  // Street level at each junction: the ground averaged over 12 m round it (kerbs, retaining walls & DTM noise out)
+  const junctionY = new Float64Array(nodeCount);
+  for (let n = 0; n < nodeCount; n++) {
+    const x = nodes[n * 2], z = nodes[n * 2 + 1];
+    let sum = groundAt(x, z);
+    for (let a = 0; a < 8; a++) sum += groundAt(x + Math.cos(a * Math.PI / 4) * 12, z + Math.sin(a * Math.PI / 4) * 12);
+    junctionY[n] = sum / 9;
+  }
   for (let n = 0; n < nodeCount; n++) {
     if (nodeY[n] === -Infinity) continue;
-    const g = groundAt(nodes[n * 2], nodes[n * 2 + 1]);
-    nodeY[n] = Math.min(nodeY[n], g + dist[n] * RAMP_GRADE);
+    nodeY[n] = Math.min(nodeY[n], junctionY[n] + dist[n] * RAMP_GRADE);
   }
 
   return links.map((l, k) => {
     const pts = shapes[k], level = l[7];
     const total = lengths[k];
     const ya = nodeY[l[0]], yb = nodeY[l[1]];
+    // Ground-level roads: a straight grade between their junctions plus a damped, 40 m-smoothed share of the
+    // ground's rise & fall in between, so streets run evenly instead of tracing every bump in the terrain
+    let along = 0;
+    const arc = pts.map((p, i) => (along += i ? Math.hypot(p[0] - pts[i - 1][0], p[1] - pts[i - 1][1]) : 0));
+    const ja = junctionY[l[0]], jb = junctionY[l[1]];
+    const residual = pts.map((p, i) => groundAt(p[0], p[1]) - (ja + (jb - ja) * (arc[i] / (total || 1))));
+    const streetY = (i) => {
+      let sum = 0, weight = 0;
+      for (let j = 0; j < pts.length; j++) {
+        const d = Math.abs(arc[j] - arc[i]);
+        if (d > 40) continue;
+        const w = Math.exp(-(d * d) / 450);
+        sum += residual[j] * w;
+        weight += w;
+      }
+      const taper = Math.min(1, arc[i] / 25, (total - arc[i]) / 25); // back to the junction's own level at both ends
+      return ja + (jb - ja) * (arc[i] / (total || 1)) + STREET_RELIEF * taper * (sum / weight);
+    };
     let s = 0;
     return {
       name: GEO.roadGraph.names[l[2]] || '',
@@ -184,7 +211,7 @@ function elevateNetwork() {
       pts: pts.map((p, i) => {
         if (i > 0) s += Math.hypot(p[0] - pts[i - 1][0], p[1] - pts[i - 1][1]);
         const ground = groundAt(p[0], p[1]);
-        if (level <= 0) return [p[0], ground, p[1]];
+        if (level <= 0) return [p[0], streetY(i), p[1]];
         // Cruise height, held within the ramp grade of both ends (a straight blend where the ends disagree)
         const lo = Math.max(ya - s * RAMP_GRADE, yb - (total - s) * RAMP_GRADE);
         const hi = Math.min(ya + s * RAMP_GRADE, yb + (total - s) * RAMP_GRADE);
@@ -309,14 +336,14 @@ function buildRoadPaint(roads) {
 // =====================================================================================================================
 const CELL = 24;
 const cellKey = (ix, iz) => (ix + 2048) * 4096 + (iz + 2048);
-function indexSegments(roads, filter) {
+function indexSegments(roads, filter, reach = 1) {
   const cells = new Map();
   for (const r of roads) {
     if (!filter(r)) continue;
     for (let i = 1; i < r.pts.length; i++) {
       const a = r.pts[i - 1], b = r.pts[i];
       const seg = { ax: a[0], ay: a[1], az: a[2], bx: b[0], by: b[1], bz: b[2], hw: r.width / 2, name: r.name, level: r.level };
-      const pad = seg.hw + 1;
+      const pad = seg.hw + reach;
       for (let ix = Math.floor((Math.min(a[0], b[0]) - pad) / CELL); ix <= Math.floor((Math.max(a[0], b[0]) + pad) / CELL); ix++) {
         for (let iz = Math.floor((Math.min(a[2], b[2]) - pad) / CELL); iz <= Math.floor((Math.max(a[2], b[2]) + pad) / CELL); iz++) {
           const k = cellKey(ix, iz);
@@ -366,10 +393,31 @@ export function buildHongKong(scene) {
   root.name = 'HongKongWorld';
   scene.add(root);
 
+  const roads = elevateNetwork();
+
+  // The ground eases to the smoothed street level beside every ground-level road (fully under the road & its
+  // pavements, blending back to the bare terrain over the next few metres)
+  const STREET_BLEND = 4.5;
+  const streetCells = indexSegments(roads, (r) => r.level === 0, 3.5 + STREET_BLEND);
+  function nearestStreet(x, z) {
+    let best = null, bestD = Infinity, bestY = 0;
+    nearSegments(streetCells, x, z, (seg, d, t) => {
+      if (d - seg.hw < bestD) { bestD = d - seg.hw; best = seg; bestY = seg.ay + (seg.by - seg.ay) * t; }
+    });
+    return best && bestD < 3.5 + STREET_BLEND ? { edge: bestD, y: bestY } : null;
+  }
+  function conformGround(x, z, y) {
+    const st = nearestStreet(x, z);
+    if (!st) return y;
+    const w = st.edge <= 3.5 ? 1 : 1 - (st.edge - 3.5) / STREET_BLEND;
+    return y + (st.y - ROAD_LIFT - y) * w;
+  }
+  const groundBase = (x, z) => conformGround(x, z, terrainHeight(x, z));
+
   // Terrain & sea
   const groundMat = createTerrainMaterial();
   const pilotRect = { minX: PILOT.x0 + 20, maxX: PILOT.x0 + (PILOT.cols - 2) * PILOT.cell, minZ: PILOT.z0 + 20, maxZ: PILOT.z0 + (PILOT.rows - 2) * PILOT.cell };
-  root.add(terrainMesh(PILOT, groundMat));
+  root.add(terrainMesh(PILOT, groundMat, null, (x, z, y) => (y < 0.4 ? y : conformGround(x, z, y))));
   root.add(terrainMesh(BACKDROP, groundMat, pilotRect));
   const sea = new THREE.Mesh(new THREE.PlaneGeometry(40000, 40000), createWaterMaterial({ harbourY: SEA_LEVEL }));
   sea.rotation.x = -Math.PI / 2;
@@ -378,7 +426,6 @@ export function buildHongKong(scene) {
   root.add(sea);
 
   // Roads: ground-level ribbons, flyover decks with girders, piers under them (tunnels are not drawn)
-  const roads = elevateNetwork();
   const groundRoads = [], decks = [];
   const piers = [];
   for (const r of roads) {
@@ -412,7 +459,7 @@ export function buildHongKong(scene) {
   // roads cross)
   const pavement = createSidewalkMaterial();
   Object.assign(pavement, { polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
-  surface(roads.filter((r) => r.level === 0).map((r) => ribbon(r.pts.map((p) => [p[0], p[1] - 0.03, p[2]]), r.width / 2 + 3.2)), pavement);
+  surface(roads.filter((r) => r.level === 0).map((r) => ribbon(r.pts.map((p) => [p[0], p[1] - 0.15, p[2]]), r.width / 2 + 3.2)), pavement);
   const deckTops = roads.filter((r) => r.level > 0).map((r) => ({ ...r, pts: r.pts.map((p) => [p[0], p[1] + 0.05, p[2]]) }));
   if (decks.length) {
     surface(decks, concrete).castShadow = true;
@@ -441,9 +488,9 @@ export function buildHongKong(scene) {
       let total = 0;
       const s = dense.map((p, i) => (total += i ? Math.hypot(p[0] - dense[i - 1][0], p[1] - dense[i - 1][1]) : 0));
       const rise = 5.5 + Math.max(0, level - 1) * 4;
-      bridges.push(ribbon(dense.map((p, i) => [p[0], terrainHeight(p[0], p[1]) + Math.min(rise, Math.min(s[i], total - s[i]) * 0.5) + 0.3, p[1]]), 1.4, 0.6));
+      bridges.push(ribbon(dense.map((p, i) => [p[0], groundBase(p[0], p[1]) + Math.min(rise, Math.min(s[i], total - s[i]) * 0.5) + 0.3, p[1]]), 1.4, 0.6));
     } else {
-      paths.push(ribbon(dense.map((p) => [p[0], Math.max(terrainHeight(p[0], p[1]), SEA_LEVEL) + 0.2, p[1]]), 1.0));
+      paths.push(ribbon(dense.map((p) => [p[0], Math.max(groundBase(p[0], p[1]), SEA_LEVEL) + 0.2, p[1]]), 1.0));
     }
   }
   if (paths.length) surface(paths, pavement);
@@ -470,7 +517,7 @@ export function buildHongKong(scene) {
       const pos = g.attributes.position;
       for (let i = 0; i < pos.count; i++) {
         const x = pos.getX(i), z = pos.getY(i);
-        pos.setXYZ(i, x, terrainHeight(x, z) + 0.12, z);
+        pos.setXYZ(i, x, groundBase(x, z) + 0.12, z);
       }
       g.index.array.reverse(); // the xz plane flips the winding: face up
       const c = parkColors[p.cat] ?? GRASS;
@@ -509,7 +556,7 @@ export function buildHongKong(scene) {
     }
     // A podium-free tower on a slope: reach down to the lowest ground under the footprint
     let ground = Infinity;
-    for (let i = 0; i < outline.length; i += 2) ground = Math.min(ground, terrainHeight(outline[i], outline[i + 1]));
+    for (let i = 0; i < outline.length; i += 2) ground = Math.min(ground, groundBase(outline[i], outline[i + 1]));
     const bottom = type === 2 ? base : Math.min(base, ground - 0.5);
     const g = new THREE.ExtrudeGeometry(shape, { depth: top - bottom, bevelEnabled: false, curveSegments: 1 });
     g.rotateX(-Math.PI / 2).translate(0, bottom, 0);
@@ -542,7 +589,9 @@ export function buildHongKong(scene) {
   const deckCells = indexSegments(roads, (r) => r.level > 0);
   const nameCells = indexSegments(roads, (r) => r.level >= 0 && r.name);
   function groundHeight(x, z, mode, refY = null) {
-    let y = terrainHeight(x, z);
+    // On a street or its pavements: the street's smoothed surface; elsewhere the ground eased towards it
+    const st = nearestStreet(x, z);
+    let y = st && st.edge <= 3.2 ? st.y : conformGround(x, z, terrainHeight(x, z));
     if (mode === 'person') y += 0.02;
     if (refY == null) return y;
     nearSegments(deckCells, x, z, (s, d, t) => {
