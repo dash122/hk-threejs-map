@@ -2,7 +2,7 @@
 
 A Hong Kong version of [Slop New York](https://github.com/mrdoob/slop-newyork) by Mr.doob: a 1:1 city simulation built with [three.js](https://threejs.org/), WebGPURenderer, and TSL. The goal is an interactive 3D Hong Kong you can explore on foot, by car, by bicycle, or by helicopter, starting with a pilot area in Eastern District (Tin Hau, North Point, Quarry Bay, Tai Koo).
 
-**Status:** this repository currently contains the unmodified Slop New York code, imported with its full history, plus a pinned three.js version. The Hong Kong geography replaces the New York data in the next steps.
+**Status:** the simulator still runs the Slop New York code and map. The Hong Kong pilot's geography is built (`js/hk-geodata.js`, see below) but the runtime does not use it yet; that is the next step.
 
 ## Run it locally
 
@@ -19,6 +19,25 @@ Run the tests with Node 20 or newer:
 node --test tests/*.cjs tests/*.mjs
 ```
 
+## Hong Kong geodata
+
+`tools/hk/` builds `js/hk-geodata.js`, the Eastern District pilot (Victoria Park to Taikoo Shing) in the simulator's world frame: 1 unit = 1 m, x = east, z = south, y = metres above Principal Datum, origin on King's Road by Java Road, North Point. It holds the land and coastline, the road centreline with levels, one-way directions, lanes and widths, a road graph, 3,400 building footprints with real base and top levels, parks, piers, tram and MTR lines, footpaths, stations and stops, and a terrain height field.
+
+The pilot extracts it reads are committed in `tools/hk/data/`, so rebuilding needs no network:
+
+```sh
+node tools/hk/build-hk-geodata.mjs
+```
+
+To refresh the extracts from the sources (about 850 MB of downloads, kept in the git-ignored `tools/hk/raw/`):
+
+```sh
+tools/hk/fetch-hk-data.sh
+node tools/hk/build-hk-geodata.mjs
+```
+
+The pilot and backdrop boxes and the HK1980 Grid conversion are in `tools/hk/hk-frame.mjs`.
+
 ## Keeping up with upstream
 
 ```sh
@@ -31,4 +50,4 @@ git merge upstream/main
 
 The project code is available under the [MIT License](LICENSE), copyright Mr.doob, for the original Slop New York code.
 
-Geographic data so far: NYC Open Data and © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright) (ODbL). Hong Kong data from [DATA.GOV.HK](https://data.gov.hk/) (Transport Department, Lands Department) and OpenStreetMap will be credited here as it is added. Third-party data and dependencies retain their respective licenses.
+Geographic data: NYC Open Data; Hong Kong road centreline from the Transport Department's [Road Network (2nd Generation)](https://data.gov.hk/en-data/dataset/hk-td-tis_15-road-network-v2), buildings and the 5 m Digital Terrain Model from the Lands Department via [DATA.GOV.HK](https://data.gov.hk/) and the [CSDI Portal](https://portal.csdi.gov.hk/); and © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright) (ODbL). Third-party data and dependencies retain their respective licenses.
