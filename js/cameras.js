@@ -41,6 +41,7 @@ class CameraSystem {
     this.currentPos = new THREE.Vector3(0, 10, 380);
     this.currentLookAt = new THREE.Vector3(0, 8, 440);
     this.initialized = false;
+    this.groundAt = null; // optional (x, z) => ground height under the camera
 
     // Follow cameras (chase / action) are smoothed relative to the followed entity, see update()
     this.followEntity = null;
@@ -351,7 +352,9 @@ class CameraSystem {
       this.followLookOffset.lerp(desiredLook.sub(entity.position), k);
       this.currentPos.set(entity.position.x, this.followBaseY, entity.position.z).add(this.followOffset);
       this.currentLookAt.set(entity.position.x, this.followBaseY, entity.position.z).add(this.followLookOffset);
-      this.currentPos.y = Math.max(0.55, this.currentPos.y);
+      // keep the camera above the street (or the hillside, where the city has terrain: groundAt(x, z))
+      const floorY = this.groundAt ? this.groundAt(this.currentPos.x, this.currentPos.z) : 0;
+      this.currentPos.y = Math.max(floorY + 0.55, this.currentPos.y);
     } else {
       this.followEntity = null;
       const k = 1 - Math.exp(-dt * 8.5);

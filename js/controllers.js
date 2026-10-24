@@ -309,7 +309,6 @@ class ThirdPersonControllerManager {
     const extX = (car ? Math.abs(cosH) * 0.86 + Math.abs(sinH) * 2.18 : radius) + 0.1;
     const extZ = (car ? Math.abs(sinH) * 0.86 + Math.abs(cosH) * 2.18 : radius) + 0.1;
     const reach = Math.max(extX, extZ);
-    const margin = heli ? 6000 : 0;
     const entity = this.getActiveEntity();
     // Conservative body cylinders, including the taxi's corners, bicycle wheels and helicopter tail/rotor.
     const body = { person: [0.48, 1.9], car: [2.4, 1.9], cyclist: [1.0, 1.9], helicopter: [6.2, 3.2] };
@@ -319,17 +318,7 @@ class ThirdPersonControllerManager {
     }));
     const cameraBack = Math.cos(0.09) * entity.chaseDistance;
     const cameraUp = entity.chaseHeight + Math.sin(0.09) * entity.chaseDistance * 0.85;
-    const clampPoint = (px, pz) => {
-      pz = Math.max(ISLAND_BOUNDS.minZ + (heli ? -6000 : 30), Math.min(ISLAND_BOUNDS.maxZ + margin, pz));
-      px = Math.max(ISLAND_BOUNDS.minX - margin, Math.min(ISLAND_BOUNDS.maxX + margin, px));
-      if (!heli && getIslandBoundsAtZ) {
-        const shore = getIslandBoundsAtZ(pz);
-        const west = shore.westX + 8, east = shore.eastX - 8;
-        if (west > east) return null;
-        px = Math.max(west, Math.min(east, px));
-      }
-      return { x: px, z: pz };
-    };
+    const clampPoint = (px, pz) => this.clampToWorld(px, pz, heli);
     const clear = (p) => {
       if (!p) return false;
       const baseY = heli ? altitude : this.getGroundHeight(p.x, p.z, this.activeMode);
@@ -360,8 +349,9 @@ class ThirdPersonControllerManager {
     const origin = clampPoint(x, z);
     if (clear(origin)) return origin;
     // Four-metre rings cover nearby streets and courtyards, with bounded work even for a click inside a large block.
-    const cx = origin ? origin.x : Math.max(ISLAND_BOUNDS.minX, Math.min(ISLAND_BOUNDS.maxX, x));
-    const cz = origin ? origin.z : Math.max(ISLAND_BOUNDS.minZ + 30, Math.min(ISLAND_BOUNDS.maxZ, z));
+    const fallback = origin || this.worldCentreToward(x, z);
+    const cx = fallback.x;
+    const cz = fallback.z;
     for (let distance = 4; distance <= 256; distance += 4) {
       for (let i = 0; i < 32; i++) {
         const angle = i * Math.PI / 16;
@@ -833,8 +823,31 @@ class ThirdPersonControllerManager {
     return out;
   }
 
-  resolveHorizontalCollision(pos, radius, yHeight = 1.0, carEntity = null, entity = carEntity) {
-    // The detailed island (the helicopter may roam out over the harbour & the boroughs)
+  // The playable area for a teleport target: the detailed island inside its shore (the helicopter may roam out over
+  // the harbour & the boroughs). Returns the clamped point, or null where there is no land at that row.
+  clampToWorld(px, pz, heli) {
+    const margin = heli ? 6000 : 0;
+    pz = Math.max(ISLAND_BOUNDS.minZ + (heli ? -6000 : 30), Math.min(ISLAND_BOUNDS.maxZ + margin, pz));
+    px = Math.max(ISLAND_BOUNDS.minX - margin, Math.min(ISLAND_BOUNDS.maxX + margin, px));
+    if (!heli && getIslandBoundsAtZ) {
+      const shore = getIslandBoundsAtZ(pz);
+      const west = shore.westX + 8, east = shore.eastX - 8;
+      if (west > east) return null;
+      px = Math.max(west, Math.min(east, px));
+    }
+    return { x: px, z: pz };
+  }
+
+  // Where to search for a teleport arrival when the target itself is off the playable area
+  worldCentreToward(x, z) {
+    return {
+      x: Math.max(ISLAND_BOUNDS.minX, Math.min(ISLAND_BOUNDS.maxX, x)),
+      z: Math.max(ISLAND_BOUNDS.minZ + 30, Math.min(ISLAND_BOUNDS.maxZ, z))
+    };
+  }
+
+  // Keeps a moving player on the playable area (the same bounds as clampToWorld), slowing a car that hits its edge
+  keepInWorld(pos, carEntity) {
     const heli = this.activeMode === 'helicopter';
     const m = heli ? 6000 : 0;
     pos.x = Math.max(ISLAND_BOUNDS.minX - m, Math.min(ISLAND_BOUNDS.maxX + m, pos.x));
@@ -851,6 +864,10 @@ class ThirdPersonControllerManager {
         if (carEntity && carEntity.speed) carEntity.speed *= 0.4;
       }
     }
+  }
+
+  resolveHorizontalCollision(pos, radius, yHeight = 1.0, carEntity = null, entity = carEntity) {
+    this.keepInWorld(pos, carEntity, entity);
 
     const sinH = carEntity ? Math.sin(carEntity.heading) : 0;
     const cosH = carEntity ? Math.cos(carEntity.heading) : 1;
