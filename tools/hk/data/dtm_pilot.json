@@ -1,0 +1,11 @@
+{
+ "source": "Lands Department, 5m Digital Terrain Model (Whole_HK_DTM_5m.asc), via DATA.GOV.HK",
+ "crs": "EPSG:2326",
+ "units": "decimetres above Hong Kong Principal Datum, Int16 little-endian, -32768 = no data",
+ "cols": 846,
+ "rows": 486,
+ "cell": 5,
+ "west": 836947.5,
+ "north": 817617.5,
+ "rowOrder": "north to south"
+}

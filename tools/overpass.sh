@@ -1,5 +1,6 @@
 #!/bin/bash
 # usage: overpass.sh <out.json> <query-file> [tries]
+# OVERPASS_ENDPOINTS (space-separated interpreter URLs) replaces the default endpoint list.
 set -euo pipefail
 
 if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
@@ -17,7 +18,7 @@ fi
 TMP=$(mktemp "${OUT}.tmp.XXXXXX")
 trap 'rm -f -- "$TMP"' EXIT
 for ((i = 1; i <= TRIES; i++)); do
-  for ep in https://overpass-api.de/api/interpreter https://lz4.overpass-api.de/api/interpreter https://z.overpass-api.de/api/interpreter; do
+  for ep in ${OVERPASS_ENDPOINTS:-https://overpass-api.de/api/interpreter https://lz4.overpass-api.de/api/interpreter https://z.overpass-api.de/api/interpreter}; do
     if code=$(curl -sS -m 240 -A "nyc-layout-research/1.0 (three.js city sim)" -o "$TMP" -w "%{http_code}" --data-urlencode "data@$Q" "$ep"); then
       if [ "$code" = "200" ] && node -e '
         const fs = require("node:fs");
