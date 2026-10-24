@@ -2,7 +2,7 @@
 
 A Hong Kong version of [Slop New York](https://github.com/mrdoob/slop-newyork) by Mr.doob: a 1:1 city simulation built with [three.js](https://threejs.org/), WebGPURenderer, and TSL. The goal is an interactive 3D Hong Kong you can explore on foot, by car, by bicycle, or by helicopter, starting with a pilot area in Eastern District (Tin Hau, North Point, Quarry Bay, Tai Koo).
 
-**Status:** the simulator still runs the Slop New York code and map. The Hong Kong pilot's geography is built (`js/hk-geodata.js`, see below) but the runtime does not use it yet; that is the next step.
+**Status:** `index.html` now opens Hong Kong's Eastern District (North Point to Tai Koo) with real terrain, roads, flyovers and buildings at their surveyed heights; you can walk, drive, cycle or fly. Traffic, pedestrians, sound and the full map are not ported yet. The original New York simulator is still at `nyc.html`.
 
 ## Run it locally
 

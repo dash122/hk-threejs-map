@@ -3,12 +3,14 @@ const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const test = require('node:test');
 
-const html = readFileSync(join(__dirname, '../index.html'), 'utf8');
+// index.html runs Hong Kong (js/hk-main.js), nyc.html the original New York (js/main.js)
+for (const [page, entry, preloadCount] of [['index.html', './js/hk-main.js', 18], ['nyc.html', './js/main.js', 30]]) {
+const html = readFileSync(join(__dirname, '..', page), 'utf8');
 const importMap = html.match(/<script type="importmap">([^]*?)<\/script>/);
 const preloads = [...html.matchAll(/<link rel="modulepreload" href="([^"]+)"\s*\/>/g)];
 const entries = [...html.matchAll(/<script type="module" src="([^"]+)"><\/script>/g)];
 
-test('city module preloads start after the import map and before stylesheets', () => {
+test(`${page}: city module preloads start after the import map and before stylesheets`, () => {
   assert.ok(importMap);
   assert.ok(preloads.length > 0);
   const stylesheetIndex = html.indexOf('rel="stylesheet"');
@@ -24,12 +26,12 @@ test('city module preloads start after the import map and before stylesheets', (
   assert.equal(imports.three, imports['three/webgpu'], 'Three.js aliases share one module instance');
 });
 
-test('native module entry and imports share canonical preloaded URLs on GitHub Pages', () => {
+test(`${page}: native module entry and imports share canonical preloaded URLs on GitHub Pages`, () => {
   const links = preloads.map((match) => match[1]);
-  assert.equal(links.length, 30);
+  assert.equal(links.length, preloadCount);
   assert.equal(new Set(links).size, links.length, 'each module is preloaded once');
   assert.equal(entries.length, 1);
-  assert.equal(entries[0][1], './js/main.js');
+  assert.equal(entries[0][1], entry);
   assert.ok(links.includes(entries[0][1]));
   assert.equal([...html.matchAll(/<script\b/g)].length, 2, 'only the import map and native entry are needed');
   const base = 'https://example.test/slop-newyork/';
@@ -43,3 +45,4 @@ test('native module entry and imports share canonical preloaded URLs on GitHub P
     }
   }
 });
+}
