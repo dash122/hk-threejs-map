@@ -120,6 +120,8 @@ class ThirdPersonControllerManager {
     this.scene = scene;
     this.colliders = colliders;
     this._colliderCells = null; // built on first use, see nearColliders()
+    // Another map (js/hk-world.js) replaces Manhattan's bounds & ground: { bounds, groundHeight(x, z, mode, refY) }
+    this.world = null;
     this.activeMode = 'car'; // 'person' | 'car' | 'cyclist' | 'helicopter'
 
     this.keys = {
@@ -254,6 +256,19 @@ class ThirdPersonControllerManager {
     this.activeMode = mode;
   }
 
+  get bounds() {
+    return this.world ? this.world.bounds : ISLAND_BOUNDS;
+  }
+
+  // Highest the helicopter may climb, and the lowest it may sink to at (x, z)
+  get ceiling() {
+    return this.world ? 900 : 380;
+  }
+
+  heliFloor(x, z) {
+    return this.world ? this.world.groundHeight(x, z, 'helicopter') + 0.25 : 0.25;
+  }
+
   getActiveEntity() {
     return this.entities[this.activeMode];
   }
@@ -263,13 +278,13 @@ class ThirdPersonControllerManager {
     this.resetInput();
     if (!Number.isFinite(heading)) heading = ent.heading;
     const heli = this.activeMode === 'helicopter';
-    const altitude = heli ? Math.max(0.25, Math.min(380, savedAltitude ?? Math.max(92, ent.position.y))) : 0;
+    const altitude = heli ? Math.max(0.25, Math.min(this.ceiling, savedAltitude ?? Math.max(92, ent.position.y))) : 0;
     const destination = this.findTeleportPosition(x, z, heading, altitude);
     if (destination) {
       ent.position.x = destination.x;
       ent.position.z = destination.z;
       ent.heading = heading;
-      ent.position.y = heli ? altitude : this.getGroundHeight(destination.x, destination.z, this.activeMode);
+      ent.position.y = heli ? altitude : this.getGroundHeight(destination.x, destination.z, this.activeMode, savedAltitude);
     }
     ent.speed = 0;
     if (this.activeMode === 'person') {
@@ -320,9 +335,9 @@ class ThirdPersonControllerManager {
     const cameraBack = Math.cos(0.09) * entity.chaseDistance;
     const cameraUp = entity.chaseHeight + Math.sin(0.09) * entity.chaseDistance * 0.85;
     const clampPoint = (px, pz) => {
-      pz = Math.max(ISLAND_BOUNDS.minZ + (heli ? -6000 : 30), Math.min(ISLAND_BOUNDS.maxZ + margin, pz));
-      px = Math.max(ISLAND_BOUNDS.minX - margin, Math.min(ISLAND_BOUNDS.maxX + margin, px));
-      if (!heli && getIslandBoundsAtZ) {
+      pz = Math.max(this.bounds.minZ + (heli ? -6000 : 30), Math.min(this.bounds.maxZ + margin, pz));
+      px = Math.max(this.bounds.minX - margin, Math.min(this.bounds.maxX + margin, px));
+      if (!heli && !this.world && getIslandBoundsAtZ) {
         const shore = getIslandBoundsAtZ(pz);
         const west = shore.westX + 8, east = shore.eastX - 8;
         if (west > east) return null;
@@ -360,8 +375,8 @@ class ThirdPersonControllerManager {
     const origin = clampPoint(x, z);
     if (clear(origin)) return origin;
     // Four-metre rings cover nearby streets and courtyards, with bounded work even for a click inside a large block.
-    const cx = origin ? origin.x : Math.max(ISLAND_BOUNDS.minX, Math.min(ISLAND_BOUNDS.maxX, x));
-    const cz = origin ? origin.z : Math.max(ISLAND_BOUNDS.minZ + 30, Math.min(ISLAND_BOUNDS.maxZ, z));
+    const cx = origin ? origin.x : Math.max(this.bounds.minX, Math.min(this.bounds.maxX, x));
+    const cz = origin ? origin.z : Math.max(this.bounds.minZ + 30, Math.min(this.bounds.maxZ, z));
     for (let distance = 4; distance <= 256; distance += 4) {
       for (let i = 0; i < 32; i++) {
         const angle = i * Math.PI / 16;
@@ -777,7 +792,12 @@ class ThirdPersonControllerManager {
     return !!b && !(b.park > 0.6 && !b.median);
   }
 
-  getGroundHeight(x, z, mode = 'person') {
+  getGroundHeight(x, z, mode = 'person', refY = null) {
+    if (this.world) {
+      // A deck only counts within a step of where the player already is (not the flyover overhead)
+      if (refY == null) refY = this.entities?.[mode]?.position.y ?? null;
+      return this.world.groundHeight(x, z, mode, refY);
+    }
     // Inside Central Park (5th Ave to Central Park West, 59th St to 110th St)
     const cp = CENTRAL_PARK_BOUNDS;
     if (x > cp.minX && x < cp.maxX && z > cp.minZ && z < cp.maxZ) {
@@ -837,9 +857,9 @@ class ThirdPersonControllerManager {
     // The detailed island (the helicopter may roam out over the harbour & the boroughs)
     const heli = this.activeMode === 'helicopter';
     const m = heli ? 6000 : 0;
-    pos.x = Math.max(ISLAND_BOUNDS.minX - m, Math.min(ISLAND_BOUNDS.maxX + m, pos.x));
-    pos.z = Math.max(ISLAND_BOUNDS.minZ + (heli ? -6000 : 30), Math.min(ISLAND_BOUNDS.maxZ + m, pos.z));
-    if (this.activeMode !== 'helicopter' && getIslandBoundsAtZ) {
+    pos.x = Math.max(this.bounds.minX - m, Math.min(this.bounds.maxX + m, pos.x));
+    pos.z = Math.max(this.bounds.minZ + (heli ? -6000 : 30), Math.min(this.bounds.maxZ + m, pos.z));
+    if (this.activeMode !== 'helicopter' && !this.world && getIslandBoundsAtZ) {
       const shore = getIslandBoundsAtZ(pos.z);
       const minShoreX = shore.westX + 8.0;
       const maxShoreX = shore.eastX - 8.0;
@@ -1116,8 +1136,8 @@ class ThirdPersonControllerManager {
     c.vx *= tireGripDamp;
     c.vz *= tireGripDamp;
 
-    this.resolveHorizontalCollision(c.position, 1.35, 1.0, c);
-    c.position.y = this.getGroundHeight(c.position.x, c.position.z, 'car');
+    this.resolveHorizontalCollision(c.position, 1.35, this.world ? c.position.y + 1.0 : 1.0, c);
+    c.position.y = this.getGroundHeight(c.position.x, c.position.z, 'car', c.position.y);
 
     // 3-DOF Spring-Damper Chassis Suspension (Pitch, Roll & Vertical Heave)
     const targetPitch = -Math.max(-1, Math.min(1, acceleration / CAR_DRIVE.acceleration)) * 0.026;
@@ -1169,8 +1189,8 @@ class ThirdPersonControllerManager {
 
     b.position.x += Math.sin(b.heading) * b.speed * dt;
     b.position.z += Math.cos(b.heading) * b.speed * dt;
-    this.resolveHorizontalCollision(b.position, 0.65, 1.0, null, b);
-    b.position.y = this.getGroundHeight(b.position.x, b.position.z, 'cyclist');
+    this.resolveHorizontalCollision(b.position, 0.65, this.world ? b.position.y + 1.0 : 1.0, null, b);
+    b.position.y = this.getGroundHeight(b.position.x, b.position.z, 'cyclist', b.position.y);
 
     const targetLean = -turnInput * Math.min(1.0, Math.abs(b.speed) / 9.0) * 0.34;
     b.leanAngle += (targetLean - b.leanAngle) * Math.min(1, dt * 9);
@@ -1224,10 +1244,11 @@ class ThirdPersonControllerManager {
     h.position.z += Math.cos(h.heading) * h.speed * dt;
     h.position.y += h.verticalSpeed * dt;
 
-    if (h.position.y < 0.25) {
-      this.reportCollision(h, groundCollider, 'ground', h.position.x, 0.25, h.position.z, 0, 1, 0, -h.verticalSpeed);
+    const floor = this.heliFloor(h.position.x, h.position.z);
+    if (h.position.y < floor) {
+      this.reportCollision(h, groundCollider, 'ground', h.position.x, floor, h.position.z, 0, 1, 0, -h.verticalSpeed);
     }
-    h.position.y = Math.max(0.25, Math.min(380, h.position.y));
+    h.position.y = Math.max(floor, Math.min(this.ceiling, h.position.y));
     this.resolveHorizontalCollision(h.position, 4.5, h.position.y, null, h);
 
     const targetPitch = (h.speed / maxHorizSpeed) * 0.24;

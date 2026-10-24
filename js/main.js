@@ -19,6 +19,10 @@ import { LightingSystem } from './lighting.js';
 import { NYCMapSystem } from './nyc-map.js';
 import { setupSceneCulling, updateSceneCulling } from './scene-culling.js';
 import { CityAudioSystem } from './audio-system.js';
+import { buildHongKong } from './hk-world.js';
+
+// Hong Kong (Eastern District pilot) is the default map; ?map=nyc brings back Manhattan
+const MAP = new URLSearchParams(location.search).get('map') === 'nyc' ? 'nyc' : 'hk';
 
 // js/main.js
 // Main entry point for New York City (Midtown Manhattan) in Three.js WebGPURenderer & TSL (three.js dev, see index.html)
@@ -73,36 +77,60 @@ async function initApp() {
     loadingStatus.textContent = 'Constructing Manhattan Grid, Landmarks & Streetscape...';
   }
 
-  // 3. Build Manhattan Geography, Iconic Landmarks, Blocks, Street Details & Traffic
-  const cityGrid = buildCityGrid(scene);
-  markInit('cityGrid');
-  const boroughs = buildBoroughs(scene, { sidewalks: cityGrid.sidewalks });
-  markInit('boroughs');
-  const { colliders: landmarkColliders } = buildLandmarks(scene);
-  markInit('landmarks');
-  const cityBlocks = buildCityBlocks(scene);
-  markInit('blocks');
-  const allColliders = [...landmarkColliders, ...cityBlocks.colliders, ...boroughs.colliders, ...(cityGrid.colliders || [])];
+  // 3. Build the map: Hong Kong's terrain, roads, flyovers & buildings, or Manhattan's geography, landmarks, blocks,
+  //    street details & traffic (Hong Kong has no traffic, street details or atlas yet: inert stand-ins)
+  let hongKong = null, boroughs, cityBlocks, streetDetails, trafficSystem, highwayTraffic, allColliders;
+  if (MAP === 'hk') {
+    hongKong = buildHongKong(scene);
+    markInit('hongKong');
+    allColliders = hongKong.colliders;
+    boroughs = {};
+    cityBlocks = { update() {}, allBlocks: [], colliders: [] };
+    streetDetails = { signalClock: { value: 0 }, audioSignals: [], footprints: [] };
+    trafficSystem = { cars: [], buses: [], peds: [], update() {} };
+    highwayTraffic = { cars: [], update() {} };
+  } else {
+    const cityGrid = buildCityGrid(scene);
+    markInit('cityGrid');
+    boroughs = buildBoroughs(scene, { sidewalks: cityGrid.sidewalks });
+    markInit('boroughs');
+    const { colliders: landmarkColliders } = buildLandmarks(scene);
+    markInit('landmarks');
+    cityBlocks = buildCityBlocks(scene);
+    markInit('blocks');
+    allColliders = [...landmarkColliders, ...cityBlocks.colliders, ...boroughs.colliders, ...(cityGrid.colliders || [])];
 
-  const streetDetails = buildStreetDetails(scene);
-  markInit('streetDetails');
-  // Buildings turned along non-grid streets have oriented colliders whose world bounds reach past their lots: they stay
-  // inside the property line anyway, so the road network (lanes & sidewalks) doesn't need them
-  const trafficSystem = createTrafficSystem(scene, cityGrid.sidewalks, [
-    ...cityGrid.footprints,
-    ...streetDetails.footprints,
-    ...allColliders.filter((c) => !c.obb)
-  ]);
-  markInit('traffic');
-  const highwayTraffic = createHighwayTraffic(scene, cityGrid.highwayLanes);
-  buildRoadPaint(scene, trafficSystem.network);
-  markInit('roadPaint');
+    streetDetails = buildStreetDetails(scene);
+    markInit('streetDetails');
+    // Buildings turned along non-grid streets have oriented colliders whose world bounds reach past their lots: they
+    // stay inside the property line anyway, so the road network (lanes & sidewalks) doesn't need them
+    trafficSystem = createTrafficSystem(scene, cityGrid.sidewalks, [
+      ...cityGrid.footprints,
+      ...streetDetails.footprints,
+      ...allColliders.filter((c) => !c.obb)
+    ]);
+    markInit('traffic');
+    highwayTraffic = createHighwayTraffic(scene, cityGrid.highwayLanes);
+    buildRoadPaint(scene, trafficSystem.network);
+    markInit('roadPaint');
+  }
+  const locationLabel = hongKong ? hongKong.locationLabel : getLocationLabel;
+  const playerStateKey = MAP === 'hk' ? 'hk-player-state' : 'nyc-player-state';
 
   // 4. Initialize Third-Person Controllers (Person, Car, Cyclist, Helicopter) & Multi-Camera System
   const controllerManager = new ThirdPersonControllerManager(scene, allColliders);
+  if (hongKong) {
+    controllerManager.world = hongKong;
+    const { x, z, heading } = hongKong.spawn;
+    for (const mode of Object.keys(controllerManager.entities)) {
+      controllerManager.setMode(mode);
+      controllerManager.teleportActiveTo(x + (mode === 'person' ? 6 : mode === 'cyclist' ? -6 : 0), z, heading, mode === 'helicopter' ? 140 : null);
+    }
+    controllerManager.setMode('car');
+  }
   // Reuse teleport placement so saved players return at rest, close to their last positions.
   try {
-    const saved = JSON.parse(localStorage.getItem('nyc-player-state'));
+    const saved = JSON.parse(localStorage.getItem(playerStateKey));
     if (saved?.version === 1) {
       for (const mode of Object.keys(controllerManager.entities)) {
         const p = saved.entities?.[mode];
@@ -119,7 +147,7 @@ async function initApp() {
       const entities = Object.fromEntries(Object.entries(controllerManager.entities).map(([mode, entity]) => [mode, {
         x: entity.position.x, y: entity.position.y, z: entity.position.z, heading: entity.heading
       }]));
-      localStorage.setItem('nyc-player-state', JSON.stringify({ version: 1, activeMode: controllerManager.activeMode, entities }));
+      localStorage.setItem(playerStateKey, JSON.stringify({ version: 1, activeMode: controllerManager.activeMode, entities }));
     } catch { /* Storage may be disabled or full. */ }
   }
 
@@ -429,8 +457,8 @@ async function initApp() {
     elLocation.replaceChildren(...nodes);
   }
 
-  function teleportTo(x, z, heading = Math.PI) {
-    const destination = controllerManager.teleportActiveTo(x, z, heading);
+  function teleportTo(x, z, heading = Math.PI, y = null) {
+    const destination = controllerManager.teleportActiveTo(x, z, heading, y);
     touchControls.reset();
     gamepadControls.reset();
     cameraSystem.resetForTeleport();
@@ -438,12 +466,16 @@ async function initApp() {
     mapSystem.waypoint = {
       x: destination.x,
       z: destination.z,
-      name: getLocationLabel(destination.x, destination.z)
+      name: locationLabel(destination.x, destination.z)
     };
     return destination;
   }
 
-  const mapSystem = new NYCMapSystem({
+  // Hong Kong has no street atlas yet: the map is an inert stand-in and its button & radar are hidden
+  const mapSystem = hongKong ? {
+    isFullMapOpen: false, waypoint: null,
+    update() {}, toggleFullMap() {}, resizeFullCanvas() {}, renderFullMap() {}
+  } : new NYCMapSystem({
     controllerManager,
     cameraSystem,
     trafficSystem,
@@ -459,6 +491,37 @@ async function initApp() {
     },
     onTeleport: teleportTo
   });
+
+  if (hongKong) {
+    // Hong Kong's own teleport list, branding & HUD
+    const popover = document.getElementById('teleport-popover');
+    const title = popover.querySelector('.pop-title');
+    popover.replaceChildren(title, ...hongKong.teleports.map((t) => {
+      const btn = document.createElement('button');
+      btn.className = 'pop-item tp-btn';
+      btn.type = 'button';
+      const name = document.createElement('span');
+      name.className = 'pop-name';
+      name.textContent = t.name;
+      const sub = document.createElement('span');
+      sub.className = 'pop-sub';
+      sub.textContent = t.sub;
+      btn.append(name, sub);
+      btn.addEventListener('click', () => {
+        teleportTo(t.x, t.z, t.heading, t.y ?? null);
+        closePopovers();
+      });
+      return btn;
+    }));
+    document.getElementById('btn-open-map')?.style.setProperty('display', 'none');
+    document.getElementById('minimap-card')?.style.setProperty('display', 'none');
+    document.title = 'Slop Hong Kong';
+    document.querySelectorAll('.brand-heading h1, .loader-title').forEach((el) => { el.textContent = 'Slop Hong Kong'; });
+    document.querySelectorAll('.mta-bullet').forEach((el) => { el.textContent = 'HK'; });
+    controllerManager.entities.car.label = 'Hong Kong Taxi';
+    controllerManager.entities.cyclist.label = 'Cyclist';
+    if (elMode) elMode.textContent = controllerManager.getActiveEntity().label;
+  }
 
   teleportButtons.forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -735,7 +798,7 @@ async function initApp() {
       if (elAltitude) elAltitude.textContent = altFt.toLocaleString('en-US');
       // The street corner of the player on the follow cameras, of the camera itself on the scenic ones
       const where = cameraSystem.getActivePreset().category === 'follow' ? activeEnt.position : cameraSystem.currentPos;
-      renderLocation(getLocationLabel(where.x, where.z));
+      renderLocation(locationLabel(where.x, where.z));
     }
   });
 }
